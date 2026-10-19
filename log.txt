@@ -1,0 +1,109 @@
+Saved {'port': 'COM7'} to params.json
+
+
+[OK] Conectado a COM7 @ 9600
+
+
+► EN_PROCESO
+
+
+► WARNING
+
+
+► EN_PROCESO
+
+
+► PASS
+
+
+► WARNING
+
+
+► EN_PROCESO
+
+
+► PASS
+
+
+► EN_PROCESO
+
+
+► WARNING
+
+
+► EN_PROCESO
+
+
+► PASS
+
+
+► EN_PROCESO
+
+
+► WARNING
+
+
+► EN_PROCESO
+
+
+► PASS
+
+
+► WARNING
+
+
+► EN_PROCESO
+
+
+► PASS
+
+
+► EN_PROCESO
+
+
+► WARNING
+
+
+► EN_PROCESO
+
+
+► PASS
+
+
+► WARNING
+
+
+► EN_PROCESO
+
+
+► PASS
+
+
+► WARNING
+
+
+► EN_PROCESO
+
+
+► PASS
+
+
+► WARNING
+
+
+► EN_PROCESO
+
+
+► PASS
+
+
+► WARNING
+
+
+► EN_PROCESO
+
+
+► PASS
+
+
+► EN_PROCESO
