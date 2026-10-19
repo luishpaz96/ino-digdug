@@ -13,6 +13,8 @@ from ffeticlient import FFEtiClient
 
 SERIAL_DUMMY = "FLG2545-00408"
 FFETI_FOLDER = r"C:\ffeti"
+# Serial que inicia la prueba sin validar en Flex Flow (no distingue mayúsculas)
+SERIAL_TEST = "test"
 
 # ======================================================
 # Redirect stdout to QTextEdit with auto-scroll
@@ -325,7 +327,9 @@ class DigDugTester(QDialog, digdug_ui):
 
             if msg == "PASS":
                 # ---- Enviar PASS a Flex Flow ----
-                if self.serial_activo:
+                if self.serial_activo and self.es_serial_test(self.serial_activo):
+                    print("[TEST] Serial de prueba: PASS no se reporta a Flex Flow\n")
+                elif self.serial_activo:
                     self.ffeti.send_results_to_FF(
                         serial_no=self.serial_activo,
                         ffeti_config_file= self.ffeti_config_file,
@@ -363,6 +367,11 @@ class DigDugTester(QDialog, digdug_ui):
 
         print("START presionado\n")
 
+        # ---- Modo prueba: serial "test" se salta la validación de Flex Flow ----
+        if self.es_serial_test(serial_no):
+            print("[TEST] Serial de prueba: se omite la validación de Flex Flow\n")
+            self.habilitar_prueba(serial_no)
+            return
 
         self.ffeti.send_results_to_FF(
             serial_no=serial_no,
@@ -373,17 +382,23 @@ class DigDugTester(QDialog, digdug_ui):
         print(self.ffeti.last_raw_message)
 
         if self.ffeti.last_status == "OK":
-            self.unidad_confirmada = True
-            self.serial_activo = serial_no
-
-            self.serial_thread.send_command("ENABLE")
-            self.start_button.setEnabled(False)
-            self.lineEdit.setEnabled(False)
-
-            print(f"Unidad escaneada: {serial_no}\n")
-            print("Dig Dug habilitado, esperando Drain & Fill\n")
+            self.habilitar_prueba(serial_no)
         else:
             print("[BLOCK] Unidad no validada por FF\n")
+
+    def es_serial_test(self, serial_no):
+        return serial_no.strip().lower() == SERIAL_TEST
+
+    def habilitar_prueba(self, serial_no):
+        self.unidad_confirmada = True
+        self.serial_activo = serial_no
+
+        self.serial_thread.send_command("ENABLE")
+        self.start_button.setEnabled(False)
+        self.lineEdit.setEnabled(False)
+
+        print(f"Unidad escaneada: {serial_no}\n")
+        print("Dig Dug habilitado, esperando Drain & Fill\n")
 
 
 # ======================================================
