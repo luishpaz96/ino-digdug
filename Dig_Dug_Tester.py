@@ -3,7 +3,7 @@ import sys
 import serial.tools.list_ports
 from PyQt5 import QtCore
 from PyQt5.QtCore import pyqtSignal, QTimer, Qt
-from PyQt5.QtWidgets import QApplication, QDialog
+from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
 from pathlib import Path
 
 from worker_serial import SerialReaderThread
@@ -244,8 +244,43 @@ class DigDugTester(QDialog, digdug_ui):
         self.lineEdit.setEnabled(True)
         self.start_button.setEnabled(True)
 
+    def mostrar_alerta_supply_tank(self):
+        print("[ALERTA] Flujo insuficiente en llenado: REVISAR SUPPLY TANK\n")
+
+        # Ventana no bloqueante: la app sigue leyendo el serial mientras está abierta
+        self.alerta_box = QMessageBox(self)
+        self.alerta_box.setIcon(QMessageBox.Warning)
+        self.alerta_box.setWindowTitle("Alerta de flujo")
+        self.alerta_box.setText("REVISAR SUPPLY TANK")
+        self.alerta_box.setInformativeText(
+            "El flujo no se mantuvo en el mínimo requerido durante el llenado."
+        )
+        self.alerta_box.setWindowFlags(self.alerta_box.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.alerta_box.setModal(False)
+        self.alerta_box.show()
+
     def on_serial_event(self, msg):
         msg = msg.strip()
+
+        # ---- Datos del sensor de flujo: DATA,<voltaje>,<flujo> ----
+        # Se imprimen solo durante drenado/llenado (EN_PROCESO)
+        if msg.startswith("DATA,"):
+            if self.last_state == "EN_PROCESO":
+                partes = msg.split(",")
+                try:
+                    flujo = float(partes[2])
+                    print(f"Flujo: {flujo:.3f}")
+                except (IndexError, ValueError):
+                    pass
+            return
+
+        if msg == "FLUJO_OK":
+            print("[OK] Flujo de llenado dentro de especificación\n")
+            return
+
+        if msg == "ALERTA_SUPPLY_TANK":
+            self.mostrar_alerta_supply_tank()
+            return
 
         # FAIL inicial oculto
         if msg == "FAIL" and self.fail_inicial_oculto:

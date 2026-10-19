@@ -89,6 +89,7 @@ void evaluarFlujo(unsigned long ahora) {
     }
     if (ahora - inicioFlujoArriba >= TIEMPO_FLUJO_MS) {
       flujoOK = true;
+      Serial.println("FLUJO_OK");   // aviso a la app: criterio cumplido
     }
   } else {
     flujoArriba = false;  // se cayó el flujo: reinicia el conteo de 10 s
@@ -178,6 +179,10 @@ void loop() {
   if (estadoLed == "PASS" && cicloActivo) {
     // Termina el llenado: el resultado depende del flujo
     cicloActivo = false;
+    if (!flujoOK) {
+      // Alerta para la app antes del FAIL: revisar Supply tank
+      Serial.println("ALERTA_SUPPLY_TANK");
+    }
     enviar(flujoOK ? "PASS" : "FAIL");
   }
   else if (estadoLed == "PASS" && lastMessage == "FAIL") {
