@@ -7,6 +7,7 @@ import serial.tools.list_ports
 from PyQt5 import QtCore
 from PyQt5.QtCore import pyqtSignal, QTimer, Qt
 from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
+from PyQt5.QtGui import QTextCursor, QTextCharFormat, QTextBlockFormat, QColor, QFont
 from pathlib import Path
 
 from worker_serial import SerialReaderThread
@@ -38,15 +39,36 @@ INTERVALO_MUESTRA_S = 1.0   # igual a INTERVALO_FLUJO_MS del Arduino
 DT_MAX_MUESTRA_S = 5.0      # si entre dos muestras pasa más que esto, se cuenta INTERVALO_MUESTRA_S
 
 # ======================================================
-# Redirect stdout to QTextEdit with auto-scroll
+# COLORES DEL OUTPUT MONITOR
+# ======================================================
+COLOR_NORMAL = "#000000"   # negro: mensajes normales
+COLOR_PASS   = "#1E8E3E"   # verde: PASS y resultados buenos
+COLOR_FAIL   = "#D93025"   # rojo: FAIL, alertas y errores
+COLOR_TEST   = "#E37400"   # naranja: serial de prueba (no se registra en Flex Flow)
+COLOR_INFO   = "#1A73E8"   # azul: avisos del proceso
+
+# ======================================================
+# Redirect stdout to QTextEdit with auto-scroll (y colores)
 # ======================================================
 class QTextEditStream:
     def __init__(self, text_edit):
         self.text_edit = text_edit
 
     def write(self, message):
+        self.escribir(message, COLOR_NORMAL)
+
+    def escribir(self, message, color, negrita=False):
+        # Cada mensaje lleva su propio formato: el color no se pasa a la línea siguiente
         if message.strip():
-            self.text_edit.append(message)
+            doc = self.text_edit.document()
+            cursor = QTextCursor(doc)
+            cursor.movePosition(QTextCursor.End)
+            formato = QTextCharFormat()
+            formato.setForeground(QColor(color))
+            formato.setFontWeight(QFont.Bold if negrita else QFont.Normal)
+            if not doc.isEmpty():
+                cursor.insertBlock(QTextBlockFormat(), formato)
+            cursor.insertText(message, formato)
             self.text_edit.verticalScrollBar().setValue(
                 self.text_edit.verticalScrollBar().maximum()
             )
@@ -124,7 +146,8 @@ class DigDugTester(QDialog, digdug_ui):
         self.start_button.clicked.connect(self.start_operation)
 
         # ---- Redirect stdout ? output_console ----
-        sys.stdout = QTextEditStream(self.output_console)
+        self.consola = QTextEditStream(self.output_console)
+        sys.stdout = self.consola
 
         # ---- Estado de proceso ----
         self.last_state = None
@@ -272,7 +295,7 @@ class DigDugTester(QDialog, digdug_ui):
 
 
     def on_error(self, err):
-        print(f"[ERROR] {err}\n")
+        self.log(f"[ERROR] {err}\n", COLOR_FAIL, True)
         self.set_status_label("NOT_CONNECTED")
         self.start_button.setEnabled(False)
 
@@ -283,6 +306,16 @@ class DigDugTester(QDialog, digdug_ui):
         self.lineEdit.clear()
         self.lineEdit.setEnabled(True)
         self.start_button.setEnabled(True)
+
+    def log(self, texto, color=COLOR_NORMAL, negrita=False):
+        """Escribe en el Output Monitor con color."""
+        self.consola.escribir(texto, color, negrita)
+
+    def color_pass(self):
+        # PASS de un serial de prueba en naranja: no es una unidad real
+        if self.serial_activo and self.es_serial_test(self.serial_activo):
+            return COLOR_TEST
+        return COLOR_PASS
 
     def enviar_a_flexflow(self, serial_no, action):
         # Limpiar el estado anterior: si la llamada falla no debe quedar un "OK" viejo
@@ -301,9 +334,15 @@ class DigDugTester(QDialog, digdug_ui):
                     action=action
                 )
             if self.ffeti.last_raw_message:
-                print(self.ffeti.last_raw_message)
+                if self.ffeti.last_status in ("OK", "PASS"):
+                    color = COLOR_PASS
+                elif self.ffeti.last_status in ("ERROR", "FAIL"):
+                    color = COLOR_FAIL
+                else:
+                    color = COLOR_NORMAL
+                self.log(self.ffeti.last_raw_message, color)
         except Exception as e:
-            print(f"[ERROR FF] {e}\n")
+            self.log(f"[ERROR FF] {e}\n", COLOR_FAIL, True)
 
     # -------------------------------
     # FLUJO
@@ -370,19 +409,21 @@ class DigDugTester(QDialog, digdug_ui):
         else:
             criterio = "NO CUMPLE"
 
-        print("========================================")
-        print(f" REPORTE DE FLUJO ({resultado})")
-        print(f"   Volumen llenado:  {self.volumen_ml:.0f} ml")
-        print(f"   Tiempo de llenado: {self.tiempo_con_flujo_s:.0f} s")
-        print(f"   Flujo Promedio:   {promedio:.3f} L/min (todo el proceso)")
-        print(f"   Flujo Mínimo:     {min_f:.3f} L/min")
-        print(f"   Flujo Máximo:     {max_f:.3f} L/min")
-        print(f"   Total muestras:   {len(self.lecturas_flujo)}")
-        print(f"   Volumen mínimo:   {criterio}")
-        print("========================================\n")
+        color = self.color_pass() if resultado == "PASS" else COLOR_FAIL
+        self.log("========================================", color)
+        self.log(f" REPORTE DE FLUJO ({resultado})", color, True)
+        self.log(f"   Volumen llenado:  {self.volumen_ml:.0f} ml", color, True)
+        self.log(f"   Tiempo de llenado: {self.tiempo_con_flujo_s:.0f} s", color)
+        self.log(f"   Flujo Promedio:   {promedio:.3f} L/min (todo el proceso)", color)
+        self.log(f"   Flujo Mínimo:     {min_f:.3f} L/min", color)
+        self.log(f"   Flujo Máximo:     {max_f:.3f} L/min", color)
+        self.log(f"   Total muestras:   {len(self.lecturas_flujo)}", color)
+        self.log(f"   Volumen mínimo:   {criterio}", color, True)
+        self.log("========================================\n", color)
 
     def mostrar_alerta_supply_tank(self):
-        print(f"[ALERTA] Volumen insuficiente ({self.volumen_ml:.0f} ml): REVISAR SUPPLY TANK\n")
+        self.log(f"[ALERTA] Volumen insuficiente ({self.volumen_ml:.0f} ml): REVISAR SUPPLY TANK\n",
+                 COLOR_FAIL, True)
 
         # Ventana no bloqueante: la app sigue leyendo el serial mientras está abierta
         self.alerta_box = QMessageBox(self)
@@ -405,7 +446,7 @@ class DigDugTester(QDialog, digdug_ui):
         try:
             self.procesar_evento_serial(msg)
         except Exception as e:
-            print(f"[ERROR SERIAL EVENT] {e}\n")
+            self.log(f"[ERROR SERIAL EVENT] {e}\n", COLOR_FAIL, True)
 
     def procesar_evento_serial(self, msg):
         msg = msg.strip()
@@ -416,12 +457,12 @@ class DigDugTester(QDialog, digdug_ui):
             return
 
         if msg == "INICIO_LLENADO":
-            print("[LLENADO] Terminó el drenado: inicia el conteo de volumen\n")
+            self.log("[LLENADO] Terminó el drenado: inicia el conteo de volumen\n", COLOR_INFO, True)
             return
 
         if msg == "VOLUMEN_OK":
             self.volumen_ok = True
-            print(f"[OK] Volumen mínimo alcanzado ({self.volumen_ml:.0f} ml)\n")
+            self.log(f"[OK] Volumen mínimo alcanzado ({self.volumen_ml:.0f} ml)\n", COLOR_PASS, True)
             return
 
         if msg == "ALERTA_SUPPLY_TANK":
@@ -452,7 +493,7 @@ class DigDugTester(QDialog, digdug_ui):
 
         # FAIL real durante proceso
         if msg == "FAIL" and self.last_state == "EN_PROCESO":
-            print(f"[FAIL] (Flujo al corte: {self.ultimo_flujo:.3f} L/min)\n")
+            self.log(f"[FAIL] (Flujo al corte: {self.ultimo_flujo:.3f} L/min)\n", COLOR_FAIL, True)
             self.imprimir_reporte_flujo("FAIL")
 
             QTimer.singleShot(
@@ -467,7 +508,10 @@ class DigDugTester(QDialog, digdug_ui):
 
         # Estados normales
         if msg in ["STANDBY", "EN_PROCESO", "PASS"]:
-            print(f"-> {msg}\n")
+            if msg == "PASS":
+                self.log(f"-> {msg}\n", self.color_pass(), True)
+            else:
+                print(f"-> {msg}\n")
             self.set_status_label(msg)
 
             # Al iniciar EN_PROCESO, registrar muestras del ciclo
@@ -480,7 +524,7 @@ class DigDugTester(QDialog, digdug_ui):
 
                 # ---- Enviar PASS a Flex Flow ----
                 if self.serial_activo and self.es_serial_test(self.serial_activo):
-                    print("[TEST] Serial de prueba: PASS no se reporta a Flex Flow\n")
+                    self.log("[TEST] Serial de prueba: PASS no se reporta a Flex Flow\n", COLOR_TEST, True)
                 elif self.serial_activo:
                     self.enviar_a_flexflow(self.serial_activo, action="-PASS")
 
@@ -503,7 +547,7 @@ class DigDugTester(QDialog, digdug_ui):
         try:
             self.iniciar_unidad()
         except Exception as e:
-            print(f"[ERROR START] {e}\n")
+            self.log(f"[ERROR START] {e}\n", COLOR_FAIL, True)
 
     def iniciar_unidad(self):
         if not self.serial_thread or not self.serial_thread.isRunning():
@@ -523,7 +567,7 @@ class DigDugTester(QDialog, digdug_ui):
 
         # ---- Serial de prueba: sin validación de Flex Flow ----
         if self.es_serial_test(serial_no):
-            print("[TEST] Serial de prueba: se omite la validación de Flex Flow\n")
+            self.log("[TEST] Serial de prueba: se omite la validación de Flex Flow\n", COLOR_TEST, True)
             self.habilitar_prueba(serial_no)
             return
 
@@ -532,7 +576,7 @@ class DigDugTester(QDialog, digdug_ui):
         if self.ffeti.last_status == "OK":
             self.habilitar_prueba(serial_no)
         else:
-            print("[BLOCK] Unidad no validada por FF\n")
+            self.log("[BLOCK] Unidad no validada por FF\n", COLOR_FAIL, True)
 
     def es_serial_test(self, serial_no):
         return serial_no.strip().lower() == SERIAL_TEST
@@ -545,7 +589,7 @@ class DigDugTester(QDialog, digdug_ui):
         if self.es_serial_test(serial_no):
             # El Arduino omite la condición de volumen: se puede probar sin flujo
             self.serial_thread.send_command("MODO_TEST")
-            print("[TEST] Sin condición de volumen: la prueba puede correr sin flujo\n")
+            self.log("[TEST] Sin condición de volumen: la prueba puede correr sin flujo\n", COLOR_TEST, True)
         self.start_button.setEnabled(False)
         self.lineEdit.setEnabled(False)
 
