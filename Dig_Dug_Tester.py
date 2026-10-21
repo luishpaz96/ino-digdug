@@ -18,8 +18,9 @@ from ffeticlient import FFEtiClient
 SERIAL_DUMMY = "FLG2545-00408"
 FFETI_FOLDER = r"C:\ffeti"
 # Serial que inicia la prueba sin validar en Flex Flow y sin condición de volumen
-# (no distingue mayúsculas)
+# (no distingue mayúsculas). El botón CICLO MANUAL hace lo mismo.
 SERIAL_TEST = "test"
+SERIAL_MANUAL = "CICLO MANUAL"   # lo que se muestra en el SN durante un ciclo manual
 
 # ======================================================
 # SENSOR DE FLUJO / REPORTE FINAL
@@ -142,8 +143,10 @@ class DigDugTester(QDialog, digdug_ui):
 
         # ---- UI ----
         self.start_button.setEnabled(False)
+        self.manual_button.setEnabled(False)
         self.settings_button.clicked.connect(self.open_settings)
         self.start_button.clicked.connect(self.start_operation)
+        self.manual_button.clicked.connect(self.start_manual)
 
         # ---- Redirect stdout ? output_console ----
         self.consola = QTextEditStream(self.output_console)
@@ -156,6 +159,8 @@ class DigDugTester(QDialog, digdug_ui):
         # ---- Estado de unidad (TRAZABILIDAD) ----
         self.unidad_confirmada = False
         self.serial_activo = None
+        self.modo_test = False      # ciclo manual o serial "test": sin Flex Flow ni condición de volumen
+        self.etiqueta_test = ""
         self.set_status_label("NOT_CONNECTED")
 
         # ---- Flags ----
@@ -280,6 +285,7 @@ class DigDugTester(QDialog, digdug_ui):
     def on_connected(self, msg):
         print(f"[OK] {msg}\n")
         self.start_button.setEnabled(True)
+        self.manual_button.setEnabled(True)
 
         # Estado listo para operar
         self.set_status_label("STANDBY")
@@ -293,27 +299,41 @@ class DigDugTester(QDialog, digdug_ui):
             print("[AUTO] Enviando ENABLE al conectar\n")
             self.serial_thread.send_command("ENABLE")
 
+        # Cursor listo en el SN para escanear
+        self.enfocar_sn()
+
 
     def on_error(self, err):
         self.log(f"[ERROR] {err}\n", COLOR_FAIL, True)
         self.set_status_label("NOT_CONNECTED")
         self.start_button.setEnabled(False)
+        self.manual_button.setEnabled(False)
 
 
     def reset_ciclo_unidad(self):
         self.unidad_confirmada = False
         self.serial_activo = None
+        self.modo_test = False
+        self.etiqueta_test = ""
         self.lineEdit.clear()
         self.lineEdit.setEnabled(True)
         self.start_button.setEnabled(True)
+        self.manual_button.setEnabled(True)
+        # Cursor de regreso en el SN: la siguiente unidad se escanea sin dar clic
+        self.enfocar_sn()
+
+    def enfocar_sn(self):
+        self.activateWindow()       # por si la alerta de Supply tank tenía el foco
+        self.lineEdit.setFocus()
+        self.lineEdit.selectAll()   # un serial rechazado se reemplaza con el siguiente escaneo
 
     def log(self, texto, color=COLOR_NORMAL, negrita=False):
         """Escribe en el Output Monitor con color."""
         self.consola.escribir(texto, color, negrita)
 
     def color_pass(self):
-        # PASS de un serial de prueba en naranja: no es una unidad real
-        if self.serial_activo and self.es_serial_test(self.serial_activo):
+        # PASS de un ciclo manual o serial "test" en naranja: no es una unidad real
+        if self.modo_test:
             return COLOR_TEST
         return COLOR_PASS
 
@@ -404,8 +424,8 @@ class DigDugTester(QDialog, digdug_ui):
 
         if self.volumen_ok:
             criterio = "CUMPLE"
-        elif self.serial_activo and self.es_serial_test(self.serial_activo):
-            criterio = "NO CUMPLE (omitido: serial TEST)"
+        elif self.modo_test:
+            criterio = f"NO CUMPLE (omitido: {self.etiqueta_test.lower()})"
         else:
             criterio = "NO CUMPLE"
 
@@ -426,6 +446,7 @@ class DigDugTester(QDialog, digdug_ui):
                  COLOR_FAIL, True)
 
         # Ventana no bloqueante: la app sigue leyendo el serial mientras está abierta
+        self.cerrar_alerta()
         self.alerta_box = QMessageBox(self)
         self.alerta_box.setIcon(QMessageBox.Warning)
         self.alerta_box.setWindowTitle("Alerta de llenado")
@@ -437,6 +458,12 @@ class DigDugTester(QDialog, digdug_ui):
         self.alerta_box.setWindowFlags(self.alerta_box.windowFlags() | Qt.WindowStaysOnTopHint)
         self.alerta_box.setModal(False)
         self.alerta_box.show()
+
+    def cerrar_alerta(self):
+        # Se cierra sola al iniciar la siguiente prueba, si nadie la cerró
+        if self.alerta_box is not None:
+            self.alerta_box.close()
+            self.alerta_box = None
 
     # -------------------------------
     # EVENTOS DEL ARDUINO
@@ -523,8 +550,8 @@ class DigDugTester(QDialog, digdug_ui):
                 self.imprimir_reporte_flujo("PASS")
 
                 # ---- Enviar PASS a Flex Flow ----
-                if self.serial_activo and self.es_serial_test(self.serial_activo):
-                    self.log("[TEST] Serial de prueba: PASS no se reporta a Flex Flow\n", COLOR_TEST, True)
+                if self.serial_activo and self.modo_test:
+                    self.log(f"[TEST] {self.etiqueta_test}: PASS no se reporta a Flex Flow\n", COLOR_TEST, True)
                 elif self.serial_activo:
                     self.enviar_a_flexflow(self.serial_activo, action="-PASS")
 
@@ -549,7 +576,14 @@ class DigDugTester(QDialog, digdug_ui):
         except Exception as e:
             self.log(f"[ERROR START] {e}\n", COLOR_FAIL, True)
 
-    def iniciar_unidad(self):
+    def start_manual(self):
+        # Botón CICLO MANUAL: lo mismo que escanear el serial "test"
+        try:
+            self.iniciar_unidad(manual=True)
+        except Exception as e:
+            self.log(f"[ERROR CICLO MANUAL] {e}\n", COLOR_FAIL, True)
+
+    def iniciar_unidad(self, manual=False):
         if not self.serial_thread or not self.serial_thread.isRunning():
             print("[MSG] Seleccione puerto primero\n")
             return
@@ -558,9 +592,18 @@ class DigDugTester(QDialog, digdug_ui):
             print("[BLOCK] Unidad ya validada, espere fin de ciclo\n")
             return
 
+        # ---- Ciclo manual: sin validación de Flex Flow ni condición de volumen ----
+        if manual:
+            print("CICLO MANUAL presionado\n")
+            self.lineEdit.setText(SERIAL_MANUAL)
+            self.log("[TEST] Ciclo manual: se omite la validación de Flex Flow\n", COLOR_TEST, True)
+            self.habilitar_prueba(SERIAL_MANUAL, "Ciclo manual")
+            return
+
         serial_no = self.lineEdit.text().strip()
         if not serial_no:
             print("[BLOCK] Escanee una unidad válida\n")
+            self.enfocar_sn()
             return
 
         print("START presionado\n")
@@ -568,7 +611,7 @@ class DigDugTester(QDialog, digdug_ui):
         # ---- Serial de prueba: sin validación de Flex Flow ----
         if self.es_serial_test(serial_no):
             self.log("[TEST] Serial de prueba: se omite la validación de Flex Flow\n", COLOR_TEST, True)
-            self.habilitar_prueba(serial_no)
+            self.habilitar_prueba(serial_no, "Serial de prueba")
             return
 
         self.enviar_a_flexflow(serial_no, action="-INFO")
@@ -577,23 +620,31 @@ class DigDugTester(QDialog, digdug_ui):
             self.habilitar_prueba(serial_no)
         else:
             self.log("[BLOCK] Unidad no validada por FF\n", COLOR_FAIL, True)
+            self.enfocar_sn()
 
     def es_serial_test(self, serial_no):
         return serial_no.strip().lower() == SERIAL_TEST
 
-    def habilitar_prueba(self, serial_no):
+    def habilitar_prueba(self, serial_no, etiqueta_test=None):
+        # Con etiqueta_test ("Ciclo manual" o "Serial de prueba"): sin Flex Flow ni condición de volumen
         self.unidad_confirmada = True
         self.serial_activo = serial_no
+        self.modo_test = etiqueta_test is not None
+        self.etiqueta_test = etiqueta_test or ""
+        self.cerrar_alerta()   # si quedó abierta la alerta de la unidad anterior
 
         self.serial_thread.send_command("ENABLE")
-        if self.es_serial_test(serial_no):
+        if self.modo_test:
             # El Arduino omite la condición de volumen: se puede probar sin flujo
             self.serial_thread.send_command("MODO_TEST")
-            self.log("[TEST] Sin condición de volumen: la prueba puede correr sin flujo\n", COLOR_TEST, True)
+            self.log(f"[TEST] {self.etiqueta_test}: sin condición de volumen, la prueba puede correr sin flujo\n",
+                     COLOR_TEST, True)
         self.start_button.setEnabled(False)
+        self.manual_button.setEnabled(False)
         self.lineEdit.setEnabled(False)
 
-        print(f"Unidad escaneada: {serial_no}\n")
+        if serial_no != SERIAL_MANUAL:
+            print(f"Unidad escaneada: {serial_no}\n")
         print("Dig Dug habilitado, esperando Drain & Fill\n")
 
 
