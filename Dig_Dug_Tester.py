@@ -24,8 +24,9 @@ SERIAL_TEST = "test"
 # SENSOR DE FLUJO / REPORTE FINAL
 # ======================================================
 # El Arduino (dig_dug_test2.ino) manda DATA,<voltaje>,<flujo>,<volumen_ml> y es
-# quien decide el PASS por volumen (VOLUMEN_MINIMO_ML). El reporte muestra ese
-# mismo volumen.
+# quien decide el PASS por volumen (VOLUMEN_MINIMO_ML). Solo cuenta el volumen
+# del llenado: después de TIEMPO_DRENADO_MS avisa INICIO_LLENADO. El reporte
+# muestra ese mismo volumen.
 # Con un sketch que solo manda el voltaje, la app convierte con el
 # [ScaleFactor] flow_rate del .ini de la estación y calcula el volumen.
 FLOW_RATE_DEFAULT = 0.0058252314   # flow_rate de la estación SCP
@@ -372,7 +373,7 @@ class DigDugTester(QDialog, digdug_ui):
         print("========================================")
         print(f" REPORTE DE FLUJO ({resultado})")
         print(f"   Volumen llenado:  {self.volumen_ml:.0f} ml")
-        print(f"   Tiempo con flujo: {self.tiempo_con_flujo_s:.0f} s")
+        print(f"   Tiempo de llenado: {self.tiempo_con_flujo_s:.0f} s")
         print(f"   Flujo Promedio:   {promedio:.3f} L/min (todo el proceso)")
         print(f"   Flujo Mínimo:     {min_f:.3f} L/min")
         print(f"   Flujo Máximo:     {max_f:.3f} L/min")
@@ -412,6 +413,10 @@ class DigDugTester(QDialog, digdug_ui):
         # ---- Sensor de flujo: DATA,<voltaje>,<flujo>,<volumen_ml> ----
         if msg.startswith("DATA,"):
             self.procesar_dato_flujo(msg)
+            return
+
+        if msg == "INICIO_LLENADO":
+            print("[LLENADO] Terminó el drenado: inicia el conteo de volumen\n")
             return
 
         if msg == "VOLUMEN_OK":

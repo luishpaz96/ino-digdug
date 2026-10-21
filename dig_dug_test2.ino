@@ -5,7 +5,8 @@
 //
 // Envía por serial:
 //   FAIL / STANDBY / EN_PROCESO / PASS   estado del proceso (solo cuando cambia)
-//   DATA,<voltaje>,<flujo>,<volumen_ml>  una muestra por segundo (volumen acumulado del ciclo)
+//   DATA,<voltaje>,<flujo>,<volumen_ml>  una muestra por segundo (volumen llenado en el ciclo)
+//   INICIO_LLENADO                       terminó el drenado: empieza el conteo de volumen
 //   VOLUMEN_OK                           se alcanzó VOLUMEN_MINIMO_ML
 //   ALERTA_SUPPLY_TANK                   NO se alcanzó (se envía justo antes del FAIL)
 //   DEBUG ...                            mensajes de depuración (la app los ignora)
@@ -18,11 +19,17 @@
 // PARÁMETROS DE FLUJO Y VOLUMEN (AJUSTABLES)
 // ======================================================
 
-// ---- Condición de PASS por volumen (drenado/llenado = EN_PROCESO) ----
-// La unidad pasa solo si durante el proceso se llenan al menos VOLUMEN_MINIMO_ML.
+// ---- Condición de PASS por volumen llenado ----
+// La unidad pasa solo si en la etapa de llenado entran al menos VOLUMEN_MINIMO_ML.
 // Si al terminar no se alcanzó, se envía ALERTA_SUPPLY_TANK y FAIL en lugar de PASS.
 const float VOLUMEN_MINIMO_ML = 355.0;   // ml
-const float FLUJO_RUIDO_LMIN  = 0.05;    // L/min. Flujos menores no se suman (ruido en el drenado)
+const float FLUJO_RUIDO_LMIN  = 0.05;    // L/min. Flujos menores no se suman (ruido del sensor)
+
+// ---- Duración del drenado ----
+// EN_PROCESO empieza con el drenado: el volumen solo se cuenta después de este
+// tiempo. Medido en prueba real (FLG2643-02912): el drenado terminó en la
+// medición 23 (0.115 L/min) y el llenado empezó en la 24, a ~23 s de EN_PROCESO.
+const unsigned long TIEMPO_DRENADO_MS = 23000;   // ms desde que inicia EN_PROCESO
 
 // ---- Conversión raw data (V) -> flujo (misma fórmula que logger.py) ----
 //   frecuencia_Hz = (V - OFFSET_V) * ESCALA_HZ
@@ -45,7 +52,8 @@ long  sumaFlujo = 0;
 int   muestrasFlujo = 0;
 float flujoActual = 0.0;
 
-bool  criterioActivo = false;       // true durante EN_PROCESO (se acumula volumen)
+bool  criterioActivo = false;       // true durante EN_PROCESO
+bool  llenadoIniciado = false;      // true cuando ya pasó TIEMPO_DRENADO_MS (se acumula volumen)
 float volumenMl = 0.0;              // ml llenados en el ciclo
 bool  volumenOK = false;            // true cuando volumenMl >= VOLUMEN_MINIMO_ML
 bool  modoTest = false;             // serial "test": se omite la condición de volumen
@@ -128,20 +136,36 @@ float voltsAFlujo(float volts) {
   return (flujo < 0) ? 0.0 : flujo;   // sin flujo negativo por el offset del sensor
 }
 
-// Inicio del drenado/llenado: volumen del ciclo en cero
+// Inicio de EN_PROCESO (empieza el drenado): volumen del ciclo en cero
 void iniciarCriterioVolumen() {
   criterioActivo = true;
+  llenadoIniciado = false;
   volumenOK = false;
   volumenMl = 0.0;
 }
 
-// Suma el volumen de la última muestra (flujo promedio x duración de la ventana).
+// Suma el volumen de la última muestra (flujo promedio x duración), contando solo
+// la parte de la muestra que cae después de TIEMPO_DRENADO_MS.
 // Regresa true justo cuando se alcanza VOLUMEN_MINIMO_ML.
-bool acumularVolumen(unsigned long ventanaMs) {
+bool acumularVolumen(unsigned long ahora, unsigned long ventanaMs) {
   if (!criterioActivo) return false;
 
+  // ms desde que inició EN_PROCESO hasta el final de esta muestra
+  unsigned long tFin = ahora - tiempoInicioProceso;
+  if (tFin <= TIEMPO_DRENADO_MS) return false;    // todavía en drenado: no se cuenta
+
+  if (!llenadoIniciado) {
+    llenadoIniciado = true;
+    Serial.println("INICIO_LLENADO");             // aviso a la app
+  }
+
+  // Parte de la muestra que ya es llenado (prorrateo en la muestra del límite)
+  unsigned long tIni  = (tFin > ventanaMs) ? (tFin - ventanaMs) : 0;
+  unsigned long desde = (tIni > TIEMPO_DRENADO_MS) ? tIni : TIEMPO_DRENADO_MS;
+  unsigned long msLlenado = tFin - desde;
+
   if (flujoActual > FLUJO_RUIDO_LMIN) {
-    volumenMl += flujoActual * ventanaMs / 60.0;   // L/min x ms -> ml
+    volumenMl += flujoActual * msLlenado / 60.0;   // L/min x ms -> ml
   }
 
   if (!volumenOK && volumenMl >= VOLUMEN_MINIMO_ML) {
@@ -168,7 +192,7 @@ void medirFlujo(unsigned long ahora) {
   sumaFlujo = 0;
   muestrasFlujo = 0;
 
-  bool alcanzado = acumularVolumen(ventana);
+  bool alcanzado = acumularVolumen(ahora, ventana);
 
   Serial.print("DATA,");
   Serial.print(volts, 4);
