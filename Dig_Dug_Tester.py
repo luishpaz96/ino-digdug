@@ -33,7 +33,7 @@ FLOW_RATE_DEFAULT = 0.0058252314   # flow_rate de la estación SCP
 FLOW_OFFSET_V = 0.0057
 FLOW_ESCALA_HZ = 100
 
-FLUJO_RUIDO_LMIN = 0.05     # L/min. Solo si la app calcula el volumen: flujos menores no se suman
+FLUJO_RUIDO_LMIN = 0.35     # L/min. Solo si la app calcula el volumen: lecturas menores son ruido y no suman
 INTERVALO_MUESTRA_S = 1.0   # igual a INTERVALO_FLUJO_MS del Arduino
 DT_MAX_MUESTRA_S = 5.0      # si entre dos muestras pasa más que esto, se cuenta INTERVALO_MUESTRA_S
 
@@ -349,7 +349,7 @@ class DigDugTester(QDialog, digdug_ui):
             if volumen_arduino > self.volumen_ml:
                 self.tiempo_con_flujo_s += dt
             self.volumen_ml = volumen_arduino
-        elif flujo > FLUJO_RUIDO_LMIN:
+        elif flujo >= FLUJO_RUIDO_LMIN:
             self.volumen_ml += flujo * dt * 1000.0 / 60.0   # L/min -> ml
             self.tiempo_con_flujo_s += dt
 

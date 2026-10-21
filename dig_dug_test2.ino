@@ -23,7 +23,9 @@
 // La unidad pasa solo si en la etapa de llenado entran al menos VOLUMEN_MINIMO_ML.
 // Si al terminar no se alcanzó, se envía ALERTA_SUPPLY_TANK y FAIL en lugar de PASS.
 const float VOLUMEN_MINIMO_ML = 355.0;   // ml
-const float FLUJO_RUIDO_LMIN  = 0.05;    // L/min. Flujos menores no se suman (ruido del sensor)
+// Lecturas menores a FLUJO_RUIDO_LMIN se ignoran: es ruido del sensor sin agua.
+// Medido con el tanque vacío: sin pasar agua el sensor marca ~0.30-0.35 L/min.
+const float FLUJO_RUIDO_LMIN  = 0.35;    // L/min
 
 // ---- Duración del drenado ----
 // EN_PROCESO empieza con el drenado: el volumen solo se cuenta después de este
@@ -164,7 +166,7 @@ bool acumularVolumen(unsigned long ahora, unsigned long ventanaMs) {
   unsigned long desde = (tIni > TIEMPO_DRENADO_MS) ? tIni : TIEMPO_DRENADO_MS;
   unsigned long msLlenado = tFin - desde;
 
-  if (flujoActual > FLUJO_RUIDO_LMIN) {
+  if (flujoActual >= FLUJO_RUIDO_LMIN) {   // menos de 0.350 L/min es ruido: no suma
     volumenMl += flujoActual * msLlenado / 60.0;   // L/min x ms -> ml
   }
 
