@@ -23,7 +23,7 @@ SERIAL_TEST = "test"
 # SENSOR DE FLUJO / REPORTE FINAL
 # ======================================================
 # El Arduino manda DATA,<voltaje>,<flujo>,<volumen_ml> y es quien decide el PASS
-# por volumen (VOLUMEN_MINIMO_ML está en dig_dug_test2/dig_dug_test2.ino). El reporte muestra
+# por volumen (VOLUMEN_MINIMO_ML está en dig_dug_test2.ino). El reporte muestra
 # ese mismo volumen.
 # Con un sketch viejo (sin volumen o solo voltaje) la app calcula el volumen y
 # convierte con el [ScaleFactor] flow_rate del .ini de la estación.
