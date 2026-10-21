@@ -22,15 +22,16 @@ SERIAL_TEST = "test"
 # ======================================================
 # SENSOR DE FLUJO / REPORTE FINAL
 # ======================================================
-# El Arduino manda DATA,<voltaje>,<flujo> y es quien decide el criterio de flujo
-# (FLUJO_MINIMO y TIEMPO_FLUJO_MS están en dig_dug_test.ino).
-# Si llega solo DATA,<voltaje> (sketch viejo), la app convierte con el
-# [ScaleFactor] flow_rate del .ini de la estación.
+# El Arduino manda DATA,<voltaje>,<flujo>,<volumen_ml> y es quien decide el PASS
+# por volumen (VOLUMEN_MINIMO_ML está en dig_dug_test.ino). El reporte muestra
+# ese mismo volumen.
+# Con un sketch viejo (sin volumen o solo voltaje) la app calcula el volumen y
+# convierte con el [ScaleFactor] flow_rate del .ini de la estación.
 FLOW_RATE_DEFAULT = 0.0058252314   # flow_rate de la estación SCP
 FLOW_OFFSET_V = 0.0057
 FLOW_ESCALA_HZ = 100
 
-FLUJO_RUIDO_LMIN = 0.05     # L/min. Flujos menores no se suman al volumen (ruido en drenado)
+FLUJO_RUIDO_LMIN = 0.05     # L/min. Solo sketch viejo: flujos menores no se suman al volumen
 INTERVALO_MUESTRA_S = 1.0   # igual a INTERVALO_FLUJO_MS del Arduino
 DT_MAX_MUESTRA_S = 5.0      # si entre dos muestras pasa más que esto, se cuenta INTERVALO_MUESTRA_S
 
@@ -329,7 +330,7 @@ class DigDugTester(QDialog, digdug_ui):
         self.lecturas_flujo = []
         self.volumen_ml = 0.0
         self.tiempo_con_flujo_s = 0.0
-        self.criterio_flujo_ok = False
+        self.volumen_ok = False
 
     def procesar_dato_flujo(self, msg):
         partes = msg.split(",")
@@ -339,6 +340,7 @@ class DigDugTester(QDialog, digdug_ui):
                 flujo = float(partes[2])   # flujo calculado por el Arduino
             else:
                 flujo = (volts - FLOW_OFFSET_V) * FLOW_ESCALA_HZ * self.flow_rate
+            volumen_arduino = float(partes[3]) if len(partes) >= 4 else None
         except (IndexError, ValueError):
             return   # línea incompleta o con ruido
 
@@ -360,8 +362,13 @@ class DigDugTester(QDialog, digdug_ui):
             return
 
         self.lecturas_flujo.append(self.ultimo_flujo)
-        if flujo > FLUJO_RUIDO_LMIN:
-            self.volumen_ml += flujo * dt * 1000.0 / 60.0   # L/min -> ml
+        if volumen_arduino is not None:
+            # El Arduino decide el PASS con este volumen: se muestra el mismo
+            if volumen_arduino > self.volumen_ml:
+                self.tiempo_con_flujo_s += dt
+            self.volumen_ml = volumen_arduino
+        elif flujo > FLUJO_RUIDO_LMIN:
+            self.volumen_ml += flujo * dt * 1000.0 / 60.0   # sketch viejo: L/min -> ml
             self.tiempo_con_flujo_s += dt
 
         print(f"[FLUJO] {self.ultimo_flujo:.3f} L/min | {self.volumen_ml:.0f} ml")
@@ -373,7 +380,12 @@ class DigDugTester(QDialog, digdug_ui):
             max_f = max(self.lecturas_flujo)
         else:
             promedio = min_f = max_f = self.ultimo_flujo
-        criterio = "CUMPLE" if self.criterio_flujo_ok else "NO CUMPLE"
+        if self.volumen_ok:
+            criterio = "CUMPLE"
+        elif self.serial_activo and self.es_serial_test(self.serial_activo):
+            criterio = "NO CUMPLE (omitido: serial TEST)"
+        else:
+            criterio = "NO CUMPLE"
 
         print("========================================")
         print(f" REPORTE DE FLUJO ({resultado})")
@@ -383,19 +395,20 @@ class DigDugTester(QDialog, digdug_ui):
         print(f"   Flujo Mínimo:     {min_f:.3f} L/min")
         print(f"   Flujo Máximo:     {max_f:.3f} L/min")
         print(f"   Total muestras:   {len(self.lecturas_flujo)}")
-        print(f"   Criterio de flujo: {criterio}")
+        print(f"   Volumen mínimo:   {criterio}")
         print("========================================\n")
 
     def mostrar_alerta_supply_tank(self):
-        print("[ALERTA] Flujo insuficiente en llenado: REVISAR SUPPLY TANK\n")
+        print(f"[ALERTA] Volumen insuficiente ({self.volumen_ml:.0f} ml): REVISAR SUPPLY TANK\n")
 
         # Ventana no bloqueante: la app sigue leyendo el serial mientras está abierta
         self.alerta_box = QMessageBox(self)
         self.alerta_box.setIcon(QMessageBox.Warning)
-        self.alerta_box.setWindowTitle("Alerta de flujo")
+        self.alerta_box.setWindowTitle("Alerta de llenado")
         self.alerta_box.setText("REVISAR SUPPLY TANK")
         self.alerta_box.setInformativeText(
-            "El flujo no se mantuvo en el mínimo requerido durante el llenado."
+            f"La unidad no alcanzó el volumen mínimo de llenado "
+            f"(se llenaron {self.volumen_ml:.0f} ml)."
         )
         self.alerta_box.setWindowFlags(self.alerta_box.windowFlags() | Qt.WindowStaysOnTopHint)
         self.alerta_box.setModal(False)
@@ -410,9 +423,9 @@ class DigDugTester(QDialog, digdug_ui):
                 self.procesar_dato_flujo(msg)
                 return
 
-            if msg == "FLUJO_OK":
-                self.criterio_flujo_ok = True
-                print("[OK] Criterio de flujo de llenado cumplido\n")
+            if msg == "VOLUMEN_OK":
+                self.volumen_ok = True
+                print(f"[OK] Volumen mínimo alcanzado ({self.volumen_ml:.0f} ml)\n")
                 return
 
             if msg == "ALERTA_SUPPLY_TANK":
@@ -527,6 +540,10 @@ class DigDugTester(QDialog, digdug_ui):
         self.serial_activo = serial_no
 
         self.serial_thread.send_command("ENABLE")
+        if self.es_serial_test(serial_no):
+            # El Arduino omite la condición de volumen: se puede probar sin flujo
+            self.serial_thread.send_command("MODO_TEST")
+            print("[TEST] Sin condición de volumen: la prueba puede correr sin flujo\n")
         self.start_button.setEnabled(False)
         self.lineEdit.setEnabled(False)
 

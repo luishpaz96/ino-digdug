@@ -1,15 +1,16 @@
 // ======================================================
 // DIG DUG TESTER - ARDUINO
 // Máquina de estados y ENABLE/DISABLE tomados de dig_dug_test2_CHIDO.ino
-// + criterio de flujo en el llenado (FAIL + alerta de Supply tank)
+// + condición de PASS por volumen llenado (FAIL + alerta de Supply tank)
 //
 // Envía por serial:
 //   FAIL / STANDBY / EN_PROCESO / PASS   estado del proceso (solo cuando cambia)
-//   DATA,<voltaje>,<flujo>               una muestra por segundo
-//   FLUJO_OK                             se cumplió el criterio de flujo
-//   ALERTA_SUPPLY_TANK                   NO se cumplió (se envía justo antes del FAIL)
+//   DATA,<voltaje>,<flujo>,<volumen_ml>  una muestra por segundo (volumen acumulado del ciclo)
+//   VOLUMEN_OK                           se alcanzó VOLUMEN_MINIMO_ML
+//   ALERTA_SUPPLY_TANK                   NO se alcanzó (se envía justo antes del FAIL)
 // Recibe:
 //   ENABLE / DISABLE
+//   MODO_TEST   (después de ENABLE, serial "test"): se omite la condición de volumen
 // ======================================================
 
 
@@ -17,16 +18,15 @@
 // PARÁMETROS AJUSTABLES
 // ======================================================
 
-// ---- Criterio de flujo en la fase de llenado (EN_PROCESO) ----
-// La unidad pasa solo si el flujo se mantiene >= FLUJO_MINIMO de forma
-// continua por al menos TIEMPO_FLUJO_MS. Si al terminar el llenado no se
-// cumplió, se envía ALERTA_SUPPLY_TANK y FAIL en lugar de PASS.
-const float         FLUJO_MINIMO    = 1.4;     // L/min
-const unsigned long TIEMPO_FLUJO_MS = 10000;   // 10 s continuos
+// ---- Condición de PASS por volumen (drenado/llenado = EN_PROCESO) ----
+// La unidad pasa solo si durante el proceso se llenan al menos VOLUMEN_MINIMO_ML.
+// Si al terminar no se alcanzó, se envía ALERTA_SUPPLY_TANK y FAIL en lugar de PASS.
+const float VOLUMEN_MINIMO_ML = 355.0;   // ml
+const float FLUJO_RUIDO_LMIN  = 0.05;    // L/min. Flujos menores no se suman (ruido en el drenado)
 
 // ---- Conversión raw data (V) -> flujo (misma fórmula que logger.py) ----
 //   frecuencia_Hz = (V - OFFSET_V) * ESCALA_HZ
-//   flujo         = frecuencia_Hz * FACTOR_FLUJO
+//   flujo         = frecuencia_Hz * FACTOR_FLUJO      (L/min)
 const float OFFSET_V     = 0.0057;
 const float ESCALA_HZ    = 100.0;
 const float FACTOR_FLUJO = 0.0058252314;  // estación SCP. BFT/IST: 0.005830904
@@ -66,17 +66,18 @@ bool huboProceso = false;
 bool esperandoPassFinal = false;
 
 // ======================================================
-// VARIABLES DEL SENSOR DE FLUJO
+// VARIABLES DEL SENSOR DE FLUJO Y VOLUMEN
 // ======================================================
 unsigned long ultimoFlujo = 0;
 long  sumaFlujo = 0;
 int   muestrasFlujo = 0;
 float flujoActual = 0.0;
 
-bool criterioActivo = false;          // true durante EN_PROCESO
-bool flujoOK = false;                 // true cuando ya se cumplió el criterio
-unsigned long tiempoFlujoArriba = 0;  // ms continuos con flujo >= FLUJO_MINIMO
-bool bloqueoFallaFlujo = false;       // tras FAIL por flujo, no salir de FAIL hasta el siguiente ENABLE
+bool  criterioActivo = false;       // true durante EN_PROCESO (se acumula volumen)
+float volumenMl = 0.0;              // ml llenados en el ciclo
+bool  volumenOK = false;            // true cuando volumenMl >= VOLUMEN_MINIMO_ML
+bool  modoTest = false;             // serial "test": se omite la condición de volumen
+bool  bloqueoFallaVolumen = false;  // tras FAIL por volumen, no salir de FAIL hasta el siguiente ENABLE
 
 // ======================================================
 // VARIABLES PARA DETECTAR PARPADEO
@@ -112,8 +113,8 @@ enum PatronFoco {
 
 // Prototipos
 void medirFlujo(unsigned long ahora);
-void evaluarFlujo(unsigned long ventanaMs);
-void iniciarCriterioFlujo();
+bool acumularVolumen(unsigned long ventanaMs);
+void iniciarCriterioVolumen();
 PatronFoco detectarPatron(int verde, int rojo, unsigned long dtVerde, unsigned long dtRojo);
 void procesarPatron(PatronFoco p);
 void enviarEstadoSerial();
@@ -141,7 +142,7 @@ void setup() {
 void loop() {
 
   // --------------------------------------------------
-  // 0. COMANDOS SERIAL (HABILITAR / BLOQUEAR)
+  // 0. COMANDOS SERIAL (HABILITAR / BLOQUEAR / MODO TEST)
   // --------------------------------------------------
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
@@ -149,8 +150,12 @@ void loop() {
 
     if (cmd == "ENABLE") {
       digitalWrite(pinEnable, HIGH);
-      failForzadoEmitido = false;  // ✅ preparar siguiente ciclo
-      bloqueoFallaFlujo = false;   // ✅ nueva unidad: ya puede volver a STANDBY
+      failForzadoEmitido = false;   // ✅ preparar siguiente ciclo
+      bloqueoFallaVolumen = false;  // ✅ nueva unidad: ya puede volver a STANDBY
+      modoTest = false;             // ✅ cada unidad empieza en modo normal
+    }
+    else if (cmd == "MODO_TEST") {
+      modoTest = true;              // ✅ serial "test": PASS sin condición de volumen
     }
     else if (cmd == "DISABLE") {
       digitalWrite(pinEnable, LOW);    // ✅ forzar FAIL
@@ -160,7 +165,7 @@ void loop() {
   unsigned long ahora = millis();
 
   // --------------------------------------------------
-  // SENSOR DE FLUJO (cada 1 s envía DATA,<volts>,<flujo>)
+  // SENSOR DE FLUJO (cada 1 s envía DATA,<volts>,<flujo>,<volumen>)
   // --------------------------------------------------
   medirFlujo(ahora);
 
@@ -229,7 +234,7 @@ void loop() {
 }
 
 // ======================================================
-// SENSOR DE FLUJO
+// SENSOR DE FLUJO Y VOLUMEN
 // ======================================================
 float voltsAFlujo(float volts) {
   float frecuencia = (volts - OFFSET_V) * ESCALA_HZ;
@@ -254,35 +259,41 @@ void medirFlujo(unsigned long ahora) {
   sumaFlujo = 0;
   muestrasFlujo = 0;
 
+  bool alcanzado = acumularVolumen(ventana);
+
   Serial.print("DATA,");
   Serial.print(volts, 4);
   Serial.print(",");
-  Serial.println(flujoActual, 4);
+  Serial.print(flujoActual, 4);
+  Serial.print(",");
+  Serial.println(volumenMl, 1);
 
-  evaluarFlujo(ventana);
-}
-
-// Inicio del drenado/llenado: reinicia el criterio de flujo
-void iniciarCriterioFlujo() {
-  criterioActivo = true;
-  flujoOK = false;
-  tiempoFlujoArriba = 0;
-}
-
-// Suma el tiempo de cada muestra con flujo >= FLUJO_MINIMO.
-// Si una muestra cae por debajo, el conteo vuelve a cero (debe ser continuo).
-void evaluarFlujo(unsigned long ventanaMs) {
-  if (!criterioActivo || flujoOK) return;
-
-  if (flujoActual >= FLUJO_MINIMO) {
-    tiempoFlujoArriba += ventanaMs;
-    if (tiempoFlujoArriba >= TIEMPO_FLUJO_MS) {
-      flujoOK = true;
-      Serial.println("FLUJO_OK");
-    }
-  } else {
-    tiempoFlujoArriba = 0;
+  if (alcanzado) {
+    Serial.println("VOLUMEN_OK");   // aviso a la app: ya se llenó el mínimo
   }
+}
+
+// Inicio del drenado/llenado: volumen del ciclo en cero
+void iniciarCriterioVolumen() {
+  criterioActivo = true;
+  volumenOK = false;
+  volumenMl = 0.0;
+}
+
+// Suma el volumen de la última muestra (flujo promedio x duración de la ventana).
+// Regresa true justo cuando se alcanza VOLUMEN_MINIMO_ML.
+bool acumularVolumen(unsigned long ventanaMs) {
+  if (!criterioActivo) return false;
+
+  if (flujoActual > FLUJO_RUIDO_LMIN) {
+    volumenMl += flujoActual * ventanaMs / 60.0;   // L/min x ms -> ml
+  }
+
+  if (!volumenOK && volumenMl >= VOLUMEN_MINIMO_ML) {
+    volumenOK = true;
+    return true;
+  }
+  return false;
 }
 
 // ======================================================
@@ -321,8 +332,8 @@ void procesarPatron(PatronFoco p) {
 
     case EST_FAIL:
       // Solo se puede salir si aparece verde fijo.
-      // Tras un FAIL por flujo la torreta sigue en verde fijo: esperar al siguiente ENABLE.
-      if (p == PATRON_STANDBY && !bloqueoFallaFlujo) {
+      // Tras un FAIL por volumen la torreta sigue en verde fijo: esperar al siguiente ENABLE.
+      if (p == PATRON_STANDBY && !bloqueoFallaVolumen) {
         estadoActual = EST_STANDBY;
       }
       break;
@@ -335,7 +346,7 @@ void procesarPatron(PatronFoco p) {
         esperandoPassFinal = false;
 
         failForzadoEmitido = false;  // ✅ CLAVE
-        iniciarCriterioFlujo();      // ✅ empieza a evaluar el flujo
+        iniciarCriterioVolumen();    // ✅ empieza a contar el volumen
       }
       break;
 
@@ -370,13 +381,13 @@ void procesarPatron(PatronFoco p) {
           esperandoPassFinal = false;
           criterioActivo = false;
 
-          // 4️⃣ ¿Se cumplió el criterio de flujo en el llenado?
-          if (flujoOK) {
+          // 4️⃣ ¿Se llenó el volumen mínimo? (en modo test no se revisa)
+          if (volumenOK || modoTest) {
             estadoActual = EST_PASS;   // ✅ PASS REAL
           } else {
             Serial.println("ALERTA_SUPPLY_TANK");
-            estadoActual = EST_FAIL;   // ❌ FAIL POR FLUJO
-            bloqueoFallaFlujo = true;
+            estadoActual = EST_FAIL;   // ❌ FAIL POR VOLUMEN
+            bloqueoFallaVolumen = true;
           }
         }
       }
