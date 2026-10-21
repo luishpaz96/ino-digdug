@@ -1,23 +1,30 @@
-const int pinVerde = 7;
-const int pinRojo  = 8;
-const int pinCafe  = 9;
+// ======================================================
+// DIG DUG TESTER - ARDUINO
+// Máquina de estados y ENABLE/DISABLE tomados de dig_dug_test2_CHIDO.ino
+// + criterio de flujo en el llenado (FAIL + alerta de Supply tank)
+//
+// Envía por serial:
+//   FAIL / STANDBY / EN_PROCESO / PASS   estado del proceso (solo cuando cambia)
+//   DATA,<voltaje>,<flujo>               una muestra por segundo
+//   FLUJO_OK                             se cumplió el criterio de flujo
+//   ALERTA_SUPPLY_TANK                   NO se cumplió (se envía justo antes del FAIL)
+// Recibe:
+//   ENABLE / DISABLE
+// ======================================================
 
-// NUEVO: pin de salida en el PLC Shield
-const int pinSalida = 3;
 
-// =====================================================================
+// ======================================================
 // PARÁMETROS AJUSTABLES
-// =====================================================================
+// ======================================================
 
-// ---- Criterio de FAIL por flujo (fase de llenado = EN_PROCESO) ----
-// La unidad pasa solo si durante el llenado el flujo se mantiene
-// >= FLUJO_MINIMO de forma continua por al menos TIEMPO_FLUJO_MS.
-// Si al terminar el llenado no se cumplió, se envía FAIL en lugar de PASS.
-const float         FLUJO_MINIMO    = 1.4;     // flujo mínimo requerido
-const unsigned long TIEMPO_FLUJO_MS = 10000;   // tiempo continuo requerido (10 s)
+// ---- Criterio de flujo en la fase de llenado (EN_PROCESO) ----
+// La unidad pasa solo si el flujo se mantiene >= FLUJO_MINIMO de forma
+// continua por al menos TIEMPO_FLUJO_MS. Si al terminar el llenado no se
+// cumplió, se envía ALERTA_SUPPLY_TANK y FAIL en lugar de PASS.
+const float         FLUJO_MINIMO    = 1.4;     // L/min
+const unsigned long TIEMPO_FLUJO_MS = 10000;   // 10 s continuos
 
-// ---- Conversión raw data (V) -> flujo ----
-// Misma fórmula que logger.py (tipo 'flow_rate_new_sensor'):
+// ---- Conversión raw data (V) -> flujo (misma fórmula que logger.py) ----
 //   frecuencia_Hz = (V - OFFSET_V) * ESCALA_HZ
 //   flujo         = frecuencia_Hz * FACTOR_FLUJO
 const float OFFSET_V     = 0.0057;
@@ -32,118 +39,140 @@ const float VREF  = 5.00;
 const unsigned long INTERVALO_FLUJO_MS = 1000;  // una muestra por segundo
 const int   LECTURAS_POR_CICLO = 4;             // lecturas de A0 en cada vuelta del loop
 
-// =====================================================================
+// ---- Tiempos de la secuencia ----
+const unsigned long TIEMPO_MIN_PROCESO  = 5000;  // ms mínimos en EN_PROCESO
+const unsigned long TIEMPO_ESTABLE_PASS = 3000;  // ms de verde fijo para confirmar PASS
+const unsigned long BLINK_THRESHOLD     = 1000;  // ms para detectar parpadeo
+const unsigned long LOOP_DELAY          = 50;    // ms
 
-// Variables del sensor de flujo
+
+// ======================================================
+// CONFIGURACIÓN DE PINES
+// ======================================================
+const int pinVerde  = 7;   // Torreta verde
+const int pinRojo   = 8;   // Torreta roja
+const int pinEnable = 3;   // SALIDA: simula sensor / interlock Dig Dug
+
+
+// ======================================================
+// VARIABLES DE LA SECUENCIA
+// ======================================================
+bool failForzadoEmitido = false;
+
+unsigned long tiempoInicioProceso = 0;
+unsigned long tiempoStandbyFinal = 0;
+
+bool huboProceso = false;
+bool esperandoPassFinal = false;
+
+// ======================================================
+// VARIABLES DEL SENSOR DE FLUJO
+// ======================================================
 unsigned long ultimoFlujo = 0;
 long  sumaFlujo = 0;
 int   muestrasFlujo = 0;
 float flujoActual = 0.0;
 
-// Variables del criterio de llenado
-bool cicloActivo = false;          // true mientras dura la fase de llenado
-bool flujoOK = false;              // true cuando ya se cumplió el criterio
-bool flujoArriba = false;          // flujo actualmente >= FLUJO_MINIMO
-unsigned long inicioFlujoArriba = 0;
+bool criterioActivo = false;          // true durante EN_PROCESO
+bool flujoOK = false;                 // true cuando ya se cumplió el criterio
+unsigned long tiempoFlujoArriba = 0;  // ms continuos con flujo >= FLUJO_MINIMO
+bool bloqueoFallaFlujo = false;       // tras FAIL por flujo, no salir de FAIL hasta el siguiente ENABLE
 
-// Variables para detectar parpadeo
+// ======================================================
+// VARIABLES PARA DETECTAR PARPADEO
+// ======================================================
 unsigned long lastChangeVerde = 0;
-unsigned long lastChangeRojo = 0;
+unsigned long lastChangeRojo  = 0;
 
 int lastStateVerde = LOW;
-int lastStateRojo = LOW;
+int lastStateRojo  = LOW;
 
-// Estado previo enviado
-String lastMessage = "";
+// ======================================================
+// ESTADOS DEL PROCESO (MÁQUINA DE ESTADOS)
+// ======================================================
+enum ProcesoEstado {
+  EST_FAIL,        // Rojo parpadeante o FAIL forzado
+  EST_STANDBY,     // Verde fijo (antes de proceso)
+  EST_EN_PROCESO,  // Verde parpadeante (drenado y llenado)
+  EST_PASS         // Verde fijo (después de proceso)
+};
 
+ProcesoEstado estadoActual = EST_FAIL;
+ProcesoEstado ultimoEstadoEnviado = EST_FAIL;
+
+// ======================================================
+// PATRONES DE TORRETA
+// ======================================================
+enum PatronFoco {
+  PATRON_NONE,
+  PATRON_FAIL,
+  PATRON_STANDBY,
+  PATRON_EN_PROCESO
+};
+
+// Prototipos
+void medirFlujo(unsigned long ahora);
+void evaluarFlujo(unsigned long ventanaMs);
+void iniciarCriterioFlujo();
+PatronFoco detectarPatron(int verde, int rojo, unsigned long dtVerde, unsigned long dtRojo);
+void procesarPatron(PatronFoco p);
+void enviarEstadoSerial();
+
+// ======================================================
+// SETUP
+// ======================================================
 void setup() {
   Serial.begin(9600);
 
   pinMode(pinVerde, INPUT);
   pinMode(pinRojo, INPUT);
-  pinMode(pinCafe, INPUT);    // ✅ Entrada café
-  pinMode(pinSalida, OUTPUT); // ✅ Salida PLC
+
+  pinMode(pinEnable, OUTPUT);
+
+  // 🔒 FAIL FORZADO AL ARRANCAR
+  digitalWrite(pinEnable, LOW);
+  estadoActual = EST_FAIL;
+  enviarEstadoSerial();
 }
 
-float voltsAFlujo(float volts) {
-  float frecuencia = (volts - OFFSET_V) * ESCALA_HZ;
-  return frecuencia * FACTOR_FLUJO;
-}
-
-// Inicia la fase de llenado: reinicia el criterio de flujo
-void iniciarCiclo(unsigned long ahora) {
-  cicloActivo = true;
-  flujoOK = false;
-  flujoArriba = false;
-  inicioFlujoArriba = ahora;
-}
-
-// Revisa con cada muestra si el flujo se ha sostenido el tiempo requerido
-void evaluarFlujo(unsigned long ahora) {
-  if (!cicloActivo || flujoOK) return;
-
-  if (flujoActual >= FLUJO_MINIMO) {
-    if (!flujoArriba) {
-      flujoArriba = true;
-      inicioFlujoArriba = ahora;
-    }
-    if (ahora - inicioFlujoArriba >= TIEMPO_FLUJO_MS) {
-      flujoOK = true;
-      Serial.println("FLUJO_OK");   // aviso a la app: criterio cumplido
-    }
-  } else {
-    flujoArriba = false;  // se cayó el flujo: reinicia el conteo de 10 s
-  }
-}
-
-// Acumula lecturas de A0 sin bloquear y cada INTERVALO_FLUJO_MS envía el promedio.
-// Así la medición de flujo no retrasa la detección de parpadeo de los LEDs.
-// Formato: DATA,<voltaje>,<flujo>   (logger.py sigue leyendo el voltaje igual)
-void medirFlujo(unsigned long ahora) {
-  for (int i = 0; i < LECTURAS_POR_CICLO; i++) {
-    sumaFlujo += analogRead(PIN_V);
-    muestrasFlujo++;
-  }
-
-  if (ahora - ultimoFlujo >= INTERVALO_FLUJO_MS && muestrasFlujo > 0) {
-    ultimoFlujo = ahora;
-
-    float volts = (sumaFlujo / (float)muestrasFlujo) * VREF / 1023.0;
-    flujoActual = voltsAFlujo(volts);
-
-    Serial.print("DATA,");
-    Serial.print(volts, 4);
-    Serial.print(",");
-    Serial.println(flujoActual, 4);
-
-    sumaFlujo = 0;
-    muestrasFlujo = 0;
-
-    evaluarFlujo(ahora);
-  }
-}
-
-void enviar(String msg) {
-  if (msg != "" && msg != lastMessage) {
-    Serial.println(msg);
-    lastMessage = msg;
-  }
-}
-
+// ======================================================
+// LOOP PRINCIPAL
+// ======================================================
 void loop() {
-  int estadoVerde = digitalRead(pinVerde);
-  int estadoRojo  = digitalRead(pinRojo);
-  int estadoCafe  = digitalRead(pinCafe); // ✅ Leer pin café
 
-  // ✅ Copiar estado del pin café a la salida
-  digitalWrite(pinSalida, estadoCafe);
+  // --------------------------------------------------
+  // 0. COMANDOS SERIAL (HABILITAR / BLOQUEAR)
+  // --------------------------------------------------
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd == "ENABLE") {
+      digitalWrite(pinEnable, HIGH);
+      failForzadoEmitido = false;  // ✅ preparar siguiente ciclo
+      bloqueoFallaFlujo = false;   // ✅ nueva unidad: ya puede volver a STANDBY
+    }
+    else if (cmd == "DISABLE") {
+      digitalWrite(pinEnable, LOW);    // ✅ forzar FAIL
+    }
+  }
 
   unsigned long ahora = millis();
 
-  // ✅ Medición del sensor de flujo en A0
+  // --------------------------------------------------
+  // SENSOR DE FLUJO (cada 1 s envía DATA,<volts>,<flujo>)
+  // --------------------------------------------------
   medirFlujo(ahora);
 
-  // Detectar cambios (parpadeo)
+  // --------------------------------------------------
+  // 1. LEER TORRETAS
+  // --------------------------------------------------
+  int estadoVerde = digitalRead(pinVerde);
+  int estadoRojo  = digitalRead(pinRojo);
+
+  // --------------------------------------------------
+  // 2. DETECTAR CAMBIOS (PARPADEO)
+  // --------------------------------------------------
   if (estadoVerde != lastStateVerde) {
     lastChangeVerde = ahora;
     lastStateVerde = estadoVerde;
@@ -154,43 +183,243 @@ void loop() {
     lastStateRojo = estadoRojo;
   }
 
-  // ---- LÓGICA DE ESTADOS (según LEDs) ----
-  String estadoLed = "";
+  unsigned long dtVerde = ahora - lastChangeVerde;
+  unsigned long dtRojo  = ahora - lastChangeRojo;
 
-  // PASS: Verde fijo sin cambios en 1 segundo
-  if ((ahora - lastChangeVerde > 1000) && estadoVerde == HIGH && estadoRojo == LOW) {
-    estadoLed = "PASS";
-  }
-  // EN PROCESO: Verde parpadeante
-  else if ((ahora - lastChangeVerde <= 1000) && estadoRojo == LOW) {
-    estadoLed = "EN_PROCESO";
-  }
-  // WARNING: Rojo parpadeante
-  else if ((ahora - lastChangeRojo <= 1000) && estadoVerde == LOW) {
-    estadoLed = "WARNING";
-  }
+  // --------------------------------------------------
+  // 3. INTERLOCK: ¿PIN ENABLE ACTIVO?
+  // --------------------------------------------------
+  if (digitalRead(pinEnable) == LOW) {
+    estadoActual = EST_FAIL;
+    criterioActivo = false;
 
-  // ---- FASE DE LLENADO + CRITERIO DE FLUJO ----
-  // Inicio del llenado (se ignora el primer segundo tras encender)
-  if (estadoLed == "EN_PROCESO" && !cicloActivo && ahora > 1000) {
-    iniciarCiclo(ahora);
-  }
-
-  if (estadoLed == "PASS" && cicloActivo) {
-    // Termina el llenado: el resultado depende del flujo
-    cicloActivo = false;
-    if (!flujoOK) {
-      // Alerta para la app antes del FAIL: revisar Supply tank
-      Serial.println("ALERTA_SUPPLY_TANK");
+    if (!failForzadoEmitido) {
+      ultimoEstadoEnviado = (ProcesoEstado)-1; // fuerza emisión
+      enviarEstadoSerial();                    // 🔔 FAIL UNA SOLA VEZ
+      failForzadoEmitido = true;
     }
-    enviar(flujoOK ? "PASS" : "FAIL");
-  }
-  else if (estadoLed == "PASS" && lastMessage == "FAIL") {
-    // Ya se reportó FAIL en este ciclo: no enviar PASS hasta el siguiente llenado
-  }
-  else {
-    enviar(estadoLed);
+
+    delay(LOOP_DELAY);
+    return;
   }
 
-  delay(50);
+  // --------------------------------------------------
+  // 4. DETECTAR PATRÓN DE TORRETA
+  // --------------------------------------------------
+  PatronFoco patron = detectarPatron(
+    estadoVerde,
+    estadoRojo,
+    dtVerde,
+    dtRojo
+  );
+
+  // --------------------------------------------------
+  // 5. MÁQUINA DE ESTADOS
+  // --------------------------------------------------
+  if (patron != PATRON_NONE) {
+    procesarPatron(patron);
+  }
+
+  // --------------------------------------------------
+  // 6. ENVIAR ESTADO POR SERIAL
+  // --------------------------------------------------
+  enviarEstadoSerial();
+
+  delay(LOOP_DELAY);
+}
+
+// ======================================================
+// SENSOR DE FLUJO
+// ======================================================
+float voltsAFlujo(float volts) {
+  float frecuencia = (volts - OFFSET_V) * ESCALA_HZ;
+  float flujo = frecuencia * FACTOR_FLUJO;
+  return (flujo < 0) ? 0.0 : flujo;   // sin flujo negativo por el offset del sensor
+}
+
+// Acumula lecturas de A0 sin bloquear y cada INTERVALO_FLUJO_MS envía el promedio.
+// Así la medición no retrasa la lectura de la torreta ni de los comandos.
+void medirFlujo(unsigned long ahora) {
+  for (int i = 0; i < LECTURAS_POR_CICLO; i++) {
+    sumaFlujo += analogRead(PIN_V);
+    muestrasFlujo++;
+  }
+
+  unsigned long ventana = ahora - ultimoFlujo;
+  if (ventana < INTERVALO_FLUJO_MS) return;
+  ultimoFlujo = ahora;
+
+  float volts = (sumaFlujo / (float)muestrasFlujo) * VREF / 1023.0;
+  flujoActual = voltsAFlujo(volts);
+  sumaFlujo = 0;
+  muestrasFlujo = 0;
+
+  Serial.print("DATA,");
+  Serial.print(volts, 4);
+  Serial.print(",");
+  Serial.println(flujoActual, 4);
+
+  evaluarFlujo(ventana);
+}
+
+// Inicio del drenado/llenado: reinicia el criterio de flujo
+void iniciarCriterioFlujo() {
+  criterioActivo = true;
+  flujoOK = false;
+  tiempoFlujoArriba = 0;
+}
+
+// Suma el tiempo de cada muestra con flujo >= FLUJO_MINIMO.
+// Si una muestra cae por debajo, el conteo vuelve a cero (debe ser continuo).
+void evaluarFlujo(unsigned long ventanaMs) {
+  if (!criterioActivo || flujoOK) return;
+
+  if (flujoActual >= FLUJO_MINIMO) {
+    tiempoFlujoArriba += ventanaMs;
+    if (tiempoFlujoArriba >= TIEMPO_FLUJO_MS) {
+      flujoOK = true;
+      Serial.println("FLUJO_OK");
+    }
+  } else {
+    tiempoFlujoArriba = 0;
+  }
+}
+
+// ======================================================
+// DETECCIÓN DE PATRÓN DE TORRETA
+// ======================================================
+PatronFoco detectarPatron(
+  int verde,
+  int rojo,
+  unsigned long dtVerde,
+  unsigned long dtRojo
+) {
+  // FAIL REAL → rojo parpadeante
+  if (rojo == HIGH && verde == LOW && dtRojo <= BLINK_THRESHOLD) {
+    return PATRON_FAIL;
+  }
+
+  // EN PROCESO → verde parpadeante
+  if (verde == HIGH && rojo == LOW && dtVerde <= BLINK_THRESHOLD) {
+    return PATRON_EN_PROCESO;
+  }
+
+  // STANDBY o PASS → verde fijo
+  if (verde == HIGH && rojo == LOW && dtVerde > BLINK_THRESHOLD) {
+    return PATRON_STANDBY;
+  }
+
+  return PATRON_NONE;
+}
+
+// ======================================================
+// LÓGICA DE SECUENCIA DEL DIG DUG
+// ======================================================
+void procesarPatron(PatronFoco p) {
+
+  switch (estadoActual) {
+
+    case EST_FAIL:
+      // Solo se puede salir si aparece verde fijo.
+      // Tras un FAIL por flujo la torreta sigue en verde fijo: esperar al siguiente ENABLE.
+      if (p == PATRON_STANDBY && !bloqueoFallaFlujo) {
+        estadoActual = EST_STANDBY;
+      }
+      break;
+
+    case EST_STANDBY:
+      if (p == PATRON_EN_PROCESO) {
+        estadoActual = EST_EN_PROCESO;
+        tiempoInicioProceso = millis();
+        huboProceso = true;
+        esperandoPassFinal = false;
+
+        failForzadoEmitido = false;  // ✅ CLAVE
+        iniciarCriterioFlujo();      // ✅ empieza a evaluar el flujo
+      }
+      break;
+
+    case EST_EN_PROCESO:
+
+      // FAIL real inmediato
+      if (p == PATRON_FAIL) {
+        estadoActual = EST_FAIL;
+        huboProceso = false;
+        esperandoPassFinal = false;
+        criterioActivo = false;
+        break;
+      }
+
+      // Verde fijo posible final
+      if (p == PATRON_STANDBY) {
+
+        // 1️⃣ ¿Duró suficiente el proceso?
+        if (millis() - tiempoInicioProceso < TIEMPO_MIN_PROCESO) {
+          break;  // ignorar verde fijo prematuro
+        }
+
+        // 2️⃣ Primera detección de posible PASS
+        if (!esperandoPassFinal) {
+          tiempoStandbyFinal = millis();
+          esperandoPassFinal = true;
+          break;
+        }
+
+        // 3️⃣ ¿Fue estable?
+        if (millis() - tiempoStandbyFinal >= TIEMPO_ESTABLE_PASS) {
+          esperandoPassFinal = false;
+          criterioActivo = false;
+
+          // 4️⃣ ¿Se cumplió el criterio de flujo en el llenado?
+          if (flujoOK) {
+            estadoActual = EST_PASS;   // ✅ PASS REAL
+          } else {
+            Serial.println("ALERTA_SUPPLY_TANK");
+            estadoActual = EST_FAIL;   // ❌ FAIL POR FLUJO
+            bloqueoFallaFlujo = true;
+          }
+        }
+      }
+      else {
+        // Si vuelve a parpadear, cancelar intento de PASS
+        esperandoPassFinal = false;
+      }
+
+      break;
+
+    case EST_PASS:
+      // Se queda en PASS hasta nuevo FAIL
+      if (p == PATRON_FAIL) {
+        estadoActual = EST_FAIL;
+      }
+      break;
+  }
+}
+
+// ======================================================
+// ENVÍO DE ESTADO POR SERIAL (SOLO SI CAMBIA)
+// ======================================================
+void enviarEstadoSerial() {
+  if (estadoActual != ultimoEstadoEnviado) {
+
+    switch (estadoActual) {
+      case EST_FAIL:
+        Serial.println("FAIL");
+        break;
+
+      case EST_STANDBY:
+        Serial.println("STANDBY");
+        break;
+
+      case EST_EN_PROCESO:
+        Serial.println("EN_PROCESO");
+        break;
+
+      case EST_PASS:
+        Serial.println("PASS");
+        break;
+    }
+
+    ultimoEstadoEnviado = estadoActual;
+  }
 }
