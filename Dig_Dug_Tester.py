@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import inspect
+import traceback
+from datetime import datetime
 from configparser import ConfigParser
 import serial.tools.list_ports
 from PyQt5 import QtCore
@@ -79,6 +81,32 @@ class QTextEditStream:
 
 
 # ======================================================
+# ERRORES: se muestran en rojo y se guardan; la app no se cierra
+# ======================================================
+LOG_ERRORES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "errores_dig_dug.log")
+
+def log_error(texto):
+    escribir = getattr(sys.stdout, "escribir", None)
+    if escribir:
+        escribir(texto, COLOR_FAIL, True)
+    else:
+        print(texto)
+
+def registrar_excepcion(tipo, valor, tb):
+    # Sin esto, PyQt5 cierra toda la app ante cualquier error no atrapado
+    detalle = "".join(traceback.format_exception(tipo, valor, tb))
+    try:
+        with open(LOG_ERRORES, "a", encoding="utf-8") as f:
+            f.write(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}]\n{detalle}")
+    except Exception:
+        pass
+    try:
+        log_error(f"[ERROR] {tipo.__name__}: {valor} (detalle en errores_dig_dug.log)\n")
+    except Exception:
+        sys.__stderr__.write(detalle)
+
+
+# ======================================================
 # SETTINGS WINDOW (solo selecciona COM)
 # ======================================================
 class SettingsWindow(QDialog, settings_ui):
@@ -88,33 +116,54 @@ class SettingsWindow(QDialog, settings_ui):
 
     def __init__(self):
         super().__init__()
-        self.setupUi(self)
+        # Protegido como en CHIDO: si settings_window.py no trae algún control
+        # (por ejemplo el selector de config), la ventana abre igual y la app no se cierra
+        try:
+            self.setupUi(self)
 
-        self.setFixedWidth(336)
-        self.setFixedHeight(97)
-        self.setWindowFlags(QtCore.Qt.WindowCloseButtonHint)
+            self.setFixedWidth(336)
+            self.setFixedHeight(97)
+            self.setWindowFlags(QtCore.Qt.WindowCloseButtonHint)
 
-        self.buttonBox.accepted.connect(self.emit_com)
-        self.populate_ports()
-        self.populate_station_name_comboBox()
+            if hasattr(self, 'buttonBox'):
+                self.buttonBox.accepted.connect(self.emit_com)
+            self.populate_ports()
+            self.populate_station_name_comboBox()
+        except Exception as e:
+            log_error(f"[WARN] Error inicializando Settings: {e}\n")
 
     def populate_ports(self):
-        self.comboBox.clear()
-        ports = serial.tools.list_ports.comports()
-        for p in ports:
-            self.comboBox.addItem(p.device)
+        try:
+            if hasattr(self, 'comboBox'):
+                self.comboBox.clear()
+                ports = serial.tools.list_ports.comports()
+                for p in ports:
+                    self.comboBox.addItem(p.device)
+        except Exception as e:
+            log_error(f"[WARN] Error buscando puertos COM: {e}\n")
 
     def emit_com(self):
-        self.com_selected.emit(self.comboBox.currentText())
-        self.config_file_selected.emit(self.station_name_cb.currentText())
-        self.close()
+        try:
+            if hasattr(self, 'comboBox'):
+                self.com_selected.emit(self.comboBox.currentText())
+            if hasattr(self, 'station_name_cb'):
+                self.config_file_selected.emit(self.station_name_cb.currentText())
+            else:
+                log_error("[WARN] Settings sin selector de config file: Flex Flow puede fallar\n")
+            self.close()
+        except Exception as e:
+            log_error(f"[WARN] Error al emitir configuracion: {e}\n")
 
     def populate_station_name_comboBox(self):
-        folder_path = Path(FFETI_FOLDER)
-        for file in folder_path.glob("*.ini"):
-            file = str(file)
-            item = file.split('\\')[-1]
-            self.station_name_cb.addItem(item)
+        try:
+            if hasattr(self, 'station_name_cb'):
+                self.station_name_cb.clear()
+                folder_path = Path(FFETI_FOLDER)
+                if folder_path.exists():
+                    for file in folder_path.glob("*.ini"):
+                        self.station_name_cb.addItem(file.name)
+        except Exception as e:
+            log_error(f"[WARN] Error cargando config files: {e}\n")
 
 
 # ======================================================
@@ -177,10 +226,13 @@ class DigDugTester(QDialog, digdug_ui):
     # SETTINGS
     # -------------------------------
     def open_settings(self):
-        self.settings = SettingsWindow()
-        self.settings.com_selected.connect(self.open_serial)
-        self.settings.config_file_selected.connect(self.get_config_file)
-        self.settings.show()
+        try:
+            self.settings = SettingsWindow()
+            self.settings.com_selected.connect(self.open_serial)
+            self.settings.config_file_selected.connect(self.get_config_file)
+            self.settings.show()
+        except Exception as e:
+            self.log(f"[ERROR SETTINGS] {e}\n", COLOR_FAIL, True)
 
     def closeEvent(self, event):
         print("\n[CLOSE] Cierre detectado ? FAIL seguro\n")
@@ -652,6 +704,7 @@ class DigDugTester(QDialog, digdug_ui):
 # MAIN
 # ======================================================
 if __name__ == "__main__":
+    sys.excepthook = registrar_excepcion
     app = QApplication(sys.argv)
     win = DigDugTester()
     win.showFullScreen()
