@@ -51,6 +51,17 @@ COLOR_TEST   = "#E37400"   # naranja: serial de prueba (no se registra en Flex F
 COLOR_INFO   = "#1A73E8"   # azul: avisos del proceso
 
 # ======================================================
+# REPORTE "VALIDACIÓN DE FLUJO" (formato de la versión CHIDO)
+# ======================================================
+# El PASS lo decide el volumen de llenado (Arduino). El drenado y el sellado se
+# revisan con las reglas de CHIDO y, si no se cumplen, salen como ALERTA.
+FLUJO_PICO_MINIMO_DRAIN   = 2.00   # L/min: pico esperado en el drenado (sin obstrucción)
+SEGUNDOS_PICO_MINIMO      = 4      # lecturas mínimas en el pico del drenado
+FLUJO_MAXIMO_SELLADO      = 0.20   # L/min: flujo máximo al final (sin fuga)
+MUESTRAS_SELLADO          = 5      # lecturas finales que se promedian para el sellado
+VOLUMEN_MINIMO_ML_REPORTE = 355    # solo se muestra; debe ser igual a VOLUMEN_MINIMO_ML del Arduino
+
+# ======================================================
 # Redirect stdout to QTextEdit with auto-scroll (y colores)
 # ======================================================
 class QTextEditStream:
@@ -67,6 +78,7 @@ class QTextEditStream:
             cursor = QTextCursor(doc)
             cursor.movePosition(QTextCursor.End)
             formato = QTextCharFormat()
+            formato.setFont(self.text_edit.font())   # no hereda la letra del reporte
             formato.setForeground(QColor(color))
             formato.setFontWeight(QFont.Bold if negrita else QFont.Normal)
             if not doc.isEmpty():
@@ -75,6 +87,18 @@ class QTextEditStream:
             self.text_edit.verticalScrollBar().setValue(
                 self.text_edit.verticalScrollBar().maximum()
             )
+
+    def escribir_html(self, html):
+        # Bloque con formato HTML: el reporte de validación, igual que en CHIDO
+        doc = self.text_edit.document()
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.End)
+        if not doc.isEmpty():
+            cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
+        cursor.insertHtml(html)
+        self.text_edit.verticalScrollBar().setValue(
+            self.text_edit.verticalScrollBar().maximum()
+        )
 
     def flush(self):
         pass
@@ -424,6 +448,12 @@ class DigDugTester(QDialog, digdug_ui):
         self.volumen_ml = 0.0
         self.tiempo_con_flujo_s = 0.0
         self.volumen_ok = False
+        # Para el reporte de validación
+        self.fase = "drenado"            # pasa a "llenado" con INICIO_LLENADO
+        self.lecturas_drenado = []
+        self.lecturas_llenado = []
+        self.alerta_volumen = False      # True si el Arduino rechazó por volumen
+        self.t_inicio_proceso = time.monotonic()
 
     def procesar_dato_flujo(self, msg):
         partes = msg.split(",")
@@ -455,6 +485,10 @@ class DigDugTester(QDialog, digdug_ui):
             return
 
         self.lecturas_flujo.append(self.ultimo_flujo)
+        if self.fase == "drenado":
+            self.lecturas_drenado.append(self.ultimo_flujo)
+        else:
+            self.lecturas_llenado.append(self.ultimo_flujo)
         if volumen_arduino is not None:
             # El Arduino decide el PASS con este volumen: se muestra el mismo
             if volumen_arduino > self.volumen_ml:
@@ -467,31 +501,83 @@ class DigDugTester(QDialog, digdug_ui):
         print(f"[FLUJO] {self.ultimo_flujo:.3f} L/min | {self.volumen_ml:.0f} ml")
 
     def imprimir_reporte_flujo(self, resultado):
-        if self.lecturas_flujo:
-            promedio = sum(self.lecturas_flujo) / len(self.lecturas_flujo)
-            min_f = min(self.lecturas_flujo)
-            max_f = max(self.lecturas_flujo)
-        else:
-            promedio = min_f = max_f = self.ultimo_flujo
+        # Reporte "VALIDACIÓN DE FLUJO" con el formato de CHIDO; el llenado es nuestro volumen
+        verde, rojo, naranja = COLOR_PASS, COLOR_FAIL, COLOR_TEST
+        def tag(texto, c):
+            return f'<b style="color: {c};">[{texto}]</b>'
+        color = self.color_pass() if resultado == "PASS" else rojo
 
+        # 1. Draining: pico del drenado y cuántas lecturas estuvieron en el pico
+        drenado = self.lecturas_drenado or self.lecturas_flujo
+        pico = max(drenado) if drenado else 0.0
+        muestras_pico = sum(1 for f in drenado if f >= FLUJO_PICO_MINIMO_DRAIN)
+        drenado_ok = pico >= FLUJO_PICO_MINIMO_DRAIN and muestras_pico >= SEGUNDOS_PICO_MINIMO
+
+        # 2. Llenado: el volumen que contó el Arduino (es el que decide el PASS)
+        activas = [f for f in self.lecturas_llenado if f >= FLUJO_RUIDO_LMIN]
+        prom_llenado = sum(activas) / len(activas) if activas else 0.0
+
+        # 3. Sellado: promedio de las últimas lecturas del ciclo
+        finales = self.lecturas_flujo[-MUESTRAS_SELLADO:]
+        sellado = sum(finales) / len(finales) if finales else 0.0
+        sellado_ok = sellado <= FLUJO_MAXIMO_SELLADO
+
+        duracion = time.monotonic() - self.t_inicio_proceso
+
+        tag_dren = tag("OK", verde) if drenado_ok else tag("ALERTA - POSIBLE OBSTRUCCIÓN", rojo)
+        tag_sell = tag("OK", verde) if sellado_ok else tag("ALERTA - POSIBLE FUGA", rojo)
         if self.volumen_ok:
-            criterio = "CUMPLE"
+            tag_llen = tag("OK", verde)
+            tag_tanque = tag("OK - Flujo Normal", verde)
         elif self.modo_test:
-            criterio = f"NO CUMPLE (omitido: {self.etiqueta_test.lower()})"
+            tag_llen = tag(f"OMITIDO - {self.etiqueta_test.upper()}", naranja)
+            tag_tanque = ""
         else:
-            criterio = "NO CUMPLE"
+            tag_llen = tag(f"FALLO - INCOMPLETO: {self.volumen_ml:.0f} mL", rojo)
+            tag_tanque = tag("ALERTA: TANQUE SIN LÍQUIDO O NIVEL BAJO", rojo)
 
-        color = self.color_pass() if resultado == "PASS" else COLOR_FAIL
-        self.log("========================================", color)
-        self.log(f" REPORTE DE FLUJO ({resultado})", color, True)
-        self.log(f"   Volumen llenado:  {self.volumen_ml:.0f} ml", color, True)
-        self.log(f"   Tiempo de llenado: {self.tiempo_con_flujo_s:.0f} s", color)
-        self.log(f"   Flujo Promedio:   {promedio:.3f} L/min (todo el proceso)", color)
-        self.log(f"   Flujo Mínimo:     {min_f:.3f} L/min", color)
-        self.log(f"   Flujo Máximo:     {max_f:.3f} L/min", color)
-        self.log(f"   Total muestras:   {len(self.lecturas_flujo)}", color)
-        self.log(f"   Volumen mínimo:   {criterio}", color, True)
-        self.log("========================================\n", color)
+        alertas = []
+        if not drenado_ok:
+            alertas.append("Pico de drenado insuficiente / posible obstrucción")
+        if not sellado_ok:
+            alertas.append("Posible fuga o válvula abierta al final")
+
+        if resultado == "PASS":
+            if self.modo_test:
+                texto = f"RESULTADO: ✅ PASS - {self.etiqueta_test.upper()} (no se reporta a Flex Flow)"
+                razones = []
+            elif alertas:
+                texto = "RESULTADO: ✅ PASS - LLENADO COMPLETO, CON ALERTAS:"
+                razones = alertas
+            else:
+                texto = "RESULTADO: ✅ PASS - LLENADO COMPLETO Y LIBRE DE OBSTRUCCIÓN"
+                razones = []
+        else:
+            texto = "RESULTADO: ❌ FAIL - UNIDAD RECHAZADA POR FLUJO:"
+            razones = [f"Tanque sin líquido o nivel bajo ({self.volumen_ml:.0f} mL inyectados de "
+                       f"{VOLUMEN_MINIMO_ML_REPORTE:.0f} mL requeridos)"] + alertas
+        res_line = f'<b style="font-size: 14pt; color: {color};">{texto}</b>' + "".join(
+            f'<br><b style="font-size: 14pt; color: {rojo};">&nbsp;&nbsp;&nbsp;&nbsp;• {r}</b>' for r in razones)
+
+        html = (
+            f'<div style="font-family: Consolas, \'Courier New\', monospace; font-size: 13pt; color: #111111;">'
+            f'<b style="color: {color}; font-size: 15pt;">==================================================<br>'
+            f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;VALIDACIÓN DE FLUJO ({resultado})<br>'
+            f'==================================================</b><br>'
+            f'&nbsp;&nbsp;1. Draining (Pico):&nbsp;&nbsp;&nbsp;&nbsp;<b>{pico:.3f} L/min</b> ({muestras_pico}s) '
+            f'{tag_dren} &gt;= {FLUJO_PICO_MINIMO_DRAIN:.2f}<br>'
+            f'&nbsp;&nbsp;2. Llenado (Filling):&nbsp;&nbsp;<b>{self.volumen_ml:.0f} mL</b> ({self.tiempo_con_flujo_s:.0f}s) '
+            f'{tag_llen} &gt;= {VOLUMEN_MINIMO_ML_REPORTE:.0f} mL<br>'
+            f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Flujo Prom. Llenado:<b>{prom_llenado:.3f} L/min</b> {tag_tanque}<br>'
+            f'&nbsp;&nbsp;3. Sellado Final:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<b>{sellado:.3f} L/min</b> '
+            f'{tag_sell} &lt;= {FLUJO_MAXIMO_SELLADO:.2f}<br>'
+            f'&nbsp;&nbsp;Total Duración:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<b>{duracion:.0f} seg</b><br>'
+            f'--------------------------------------------------<br>'
+            f'{res_line}<br>'
+            f'=================================================='
+            f'</div>'
+        )
+        self.consola.escribir_html(html)
 
     def mostrar_alerta_supply_tank(self):
         self.log(f"[ALERTA] Volumen insuficiente ({self.volumen_ml:.0f} ml): REVISAR SUPPLY TANK\n",
@@ -536,6 +622,7 @@ class DigDugTester(QDialog, digdug_ui):
             return
 
         if msg == "INICIO_LLENADO":
+            self.fase = "llenado"
             self.log("[LLENADO] Terminó el drenado: inicia el conteo de volumen\n", COLOR_INFO, True)
             return
 
@@ -545,6 +632,7 @@ class DigDugTester(QDialog, digdug_ui):
             return
 
         if msg == "ALERTA_SUPPLY_TANK":
+            self.alerta_volumen = True
             self.mostrar_alerta_supply_tank()
             return
 
@@ -572,8 +660,16 @@ class DigDugTester(QDialog, digdug_ui):
 
         # FAIL real durante proceso
         if msg == "FAIL" and self.last_state == "EN_PROCESO":
-            self.log(f"[FAIL] (Flujo al corte: {self.ultimo_flujo:.3f} L/min)\n", COLOR_FAIL, True)
-            self.imprimir_reporte_flujo("FAIL")
+            if self.alerta_volumen:
+                # El Arduino terminó el proceso y rechazó la unidad por volumen
+                self.imprimir_reporte_flujo("FAIL")
+            else:
+                # Corte a media prueba (torreta en rojo), como lo muestra CHIDO
+                self.consola.escribir_html(
+                    f'<div style="font-family: Consolas, \'Courier New\', monospace; font-size: 13pt; '
+                    f'color: {COLOR_FAIL}; font-weight: bold;">[FAIL] CORTE EN PROCESO '
+                    f'(Flujo al momento del corte: {self.ultimo_flujo:.3f} L/min)</div>'
+                )
 
             QTimer.singleShot(
                 150,
