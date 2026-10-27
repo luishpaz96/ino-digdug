@@ -66,7 +66,7 @@ Y_FUENTE = 41.91        # pin 1 de la bornera de alimentación J4 (encima de la 
 X_FUSIBLE, Y_FUSIBLE = 19.5, 37.75  # pin 1 del portafusible 5x20 (entrada); el pin 2 queda a 22.5 mm
 X_TVS, Y_TVS = 49.5, 11.0           # cátodo del TVS opcional D1 (esquina libre de arriba a la derecha); ánodo 12.7 mm a la derecha
 X_PTC, Y_PTC = 48.5, 37.75          # PTC opcional F2 (en línea con F1, a su derecha); pad 1 = 24V, pad 2 = 24V_IN
-X_RUTA_A0, Y_DIAG_A0 = 59.0, 39.0   # la pista V -> A0 rodea por la derecha a F2
+X_RUTA_A0, Y_DIAG_A0 = 60.0, 39.0   # la pista V -> A0 rodea por la derecha a F2, lejos de la pista de 24V
 X_TITULO, Y_TITULO = 29.0, 10.0
 
 # ======================= ARDUINO UNO R3 =======================
@@ -470,7 +470,9 @@ def construir():
     P.append(("F.Cu", [(xF2, yJ24), (xJ2, yJ24)], PISTA_POT, "+24V"))
     # PTC F2 en paralelo con F1: la entrada pasa por debajo del portafusible hasta F2.2 ; F2.1 -> F1.2
     yI = yF1 + 3.7
-    P.append(("F.Cu", [(xF1, yF1), (xF1 + (yI - yF1), yI), (xP2, yI), (xP2, yP)], PISTA_POT, "+24V_IN"))
+    ch = 1.6        # esquina recortada a 45° para alejarla de la pista de A0
+    P.append(("F.Cu", [(xF1, yF1), (xF1 + (yI - yF1), yI), (xP2 - ch, yI), (xP2, yI - ch), (xP2, yP)],
+              PISTA_POT, "+24V_IN"))
     tramo = [(xP1, yP)] + ([(xP1 - abs(yF1 - yP), yF1)] if abs(yF1 - yP) > 1e-6 else []) + [(xF2, yF1)]
     P.append(("F.Cu", tramo, PISTA_POT, "+24V"))
     # cátodo del TVS D1 (esquina de arriba a la derecha) <- unión de 24V, subiendo entre las filas del módulo
