@@ -1,0 +1,20 @@
+M48
+; DRILL file {generar_shield.py rev3} date 2026-10-27
+; FORMAT={-:-/ absolute / metric / decimal}
+; #@! TF.FileFunction,NonPlated,1,2,NPTH
+FMAT,2
+METRIC
+T1C2.700
+T2C3.200
+%
+G90
+G05
+T1
+X30.7500Y15.5900
+T2
+X13.9700Y2.5400
+X15.2400Y50.8000
+X66.0400Y35.5600
+X66.0400Y7.6200
+T0
+M30
