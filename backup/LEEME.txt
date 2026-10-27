@@ -1,0 +1,38 @@
+Respaldo: cada archivo del repo en su primera versión (el commit donde se agregó).
+Creado el 2026-10-27. Formato: commit  fecha  archivo
+
+d323fc7  2026-10-19  Dig_Dug_Tester.lnk
+d323fc7  2026-10-19  Dig_Dug_Tester.py
+7db8718  2026-10-20  Dig_Dug_Tester_CHIDO.py
+d323fc7  2026-10-19  Dig_Dug_Tester_emergency_test.py
+e3d5be5  2026-10-23  VERSION REPORTE/Dig_Dug_Tester_report.py
+e3d5be5  2026-10-23  VERSION REPORTE/dig_dug_test2/dig_dug_test2_report.ino
+e3d5be5  2026-10-23  VERSION REPORTE/dig_dug_test2/ffeticlient.out
+e3d5be5  2026-10-23  VERSION REPORTE/dig_dug_test2_report.ino
+d323fc7  2026-10-19  __pycache__/arduino_pyserial_test_2.cpython-39.pyc
+d323fc7  2026-10-19  __pycache__/dig_dug_ui.cpython-310.pyc
+d323fc7  2026-10-19  __pycache__/dig_dug_ui.cpython-39.pyc
+d323fc7  2026-10-19  __pycache__/ffeticlient.cpython-310.pyc
+d323fc7  2026-10-19  __pycache__/ffeticlient.cpython-39.pyc
+d323fc7  2026-10-19  __pycache__/settings_window.cpython-310.pyc
+d323fc7  2026-10-19  __pycache__/settings_window.cpython-39.pyc
+d323fc7  2026-10-19  __pycache__/worker_serial.cpython-310.pyc
+d323fc7  2026-10-19  __pycache__/worker_serial.cpython-39.pyc
+d323fc7  2026-10-19  arduino_pyserial_test.py
+d323fc7  2026-10-19  arduino_pyserial_test_2.py
+d323fc7  2026-10-19  dig_dug_gui.ui
+d323fc7  2026-10-19  dig_dug_test.ino
+b4c714a  2026-10-21  dig_dug_test2.ino
+d323fc7  2026-10-19  dig_dug_test2/dig_dug_test2.ino
+d323fc7  2026-10-19  dig_dug_test2/ffeticlient.out
+7db8718  2026-10-20  dig_dug_test2_CHIDO.ino
+d323fc7  2026-10-19  dig_dug_ui.py
+d323fc7  2026-10-19  ffeticlient.out
+d323fc7  2026-10-19  ffeticlient.py
+d323fc7  2026-10-19  flow.txt
+d323fc7  2026-10-19  flujo_arduino.ino
+d323fc7  2026-10-19  log.txt
+d323fc7  2026-10-19  logger.py
+d323fc7  2026-10-19  settings_window.py
+d323fc7  2026-10-19  settings_window.ui
+d323fc7  2026-10-19  worker_serial.py
